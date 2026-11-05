@@ -1,5 +1,16 @@
 # Adaptive Multi-Armed Bandit Simulator
 
+> **Quick start** — clone the repo, then:
+> ```bash
+> pip install -r requirements.txt
+> python main.py
+> ```
+> This runs all 300 simulations and writes results to `bandit_results.db`.
+> Plots appear in `plots/<experiment_id>/`. A reference database and plots
+> are already included in the repository for convenience.
+
+📄 **Analysis:** see [`REPORT.md`](REPORT.md) for the full discussion of results.
+
 A Python simulation framework for implementing and evaluating Multi-Armed Bandit (MAB) algorithms in stationary and non-stationary environments.
 
 The project compares three action-selection strategies using reproducible experiments, shared random reward conditions, SQLite storage, and performance visualizations.
@@ -149,7 +160,24 @@ For the non-stationary environment, a vertical reference line marks the change a
 
 ---
 
-## 8. Project Structure
+## 8. Assumptions and Deviations
+
+The following choices are explicitly made and documented:
+
+| Decision | Value / Behavior | Rationale |
+|---|---|---|
+| Initial action values | `Q(a) = 0` for all arms | Bernoulli rewards live in `[0, 1]`; zero is a neutral prior that biases toward *exploring* all arms at least once. A high initial value (e.g., 5) would force deterministic initial exploration, which is a different algorithm (optimistic initialization). |
+| Tie-breaking | Uniform random among tied best arms | `np.argmax` always returns the lowest index among ties, systematically biasing the agent toward early-indexed arms. Random tie-breaking removes this bias and uses the agent's own RNG, keeping the behavior reproducible. |
+| Reward exploration | ε applied on *every* step, including the first | The agents have no special "try each arm once" phase; the ε = 0.1 rate is enough to sample all five arms within the first ~50 steps with high probability. |
+| Number of runs | 50 | Follows the explicit configuration in the assignment (§5); the general description elsewhere mentions 100. See the note under §5. |
+| ε and α | Fixed at 0.1 | The assignment specifies these values; no decay or tuning is applied. Decaying ε or α is listed under "Limitations and Future Work" (§18). |
+| Reward sampling | Bernoulli per step, via a shared uniform matrix | Implemented as `reward = 1 if uniform[step, arm] < p[arm] else 0`. Equivalent to `np.random.binomial(1, p)` but supports Common Random Numbers across agents. |
+| Probability access | `get_probabilities()` is evaluation-only | Agents never receive `p`, nor the uniform matrix. Only the experiment runner computes `regret_t` and `optimal_action_t`. |
+| Random number generation | `numpy.random.SeedSequence(42)` spawning two branches | Environment seeds and agent seeds are generated independently, so an agent's internal RNG cannot accidentally correlate with the rewards it observes. |
+
+---
+
+## 9. Project Structure
 
 ```
 Adaptive Multi-Armed Bandit Simulator/
@@ -202,7 +230,7 @@ Adaptive Multi-Armed Bandit Simulator/
 
 ---
 
-## 9. Installation
+## 10. Installation
 
 ### Requirements
 - Python 3.10+
@@ -219,7 +247,7 @@ pip install -r requirements.txt
 
 ---
 
-## 10. Usage
+## 11. Usage
 
 ### Run a new experiment
 
@@ -238,6 +266,29 @@ This will:
 5. Print a summary.
 
 **Each execution creates a new experiment.** Previous experiments are never overwritten (the `experiments.experiment_id` primary key rejects duplicates at the database level).
+
+Expected terminal output:
+
+```
+Starting new experiment...
+Experiment ID: bandit_exp_20261105_145548_656317
+Running random on stationary...
+Running sample_average on stationary...
+Running constant_step on stationary...
+Running random on non_stationary...
+Running sample_average on non_stationary...
+Running constant_step on non_stationary...
+Database tables created (or already exist).
+Saved 300,000 step records.
+Saved: plots/bandit_exp_.../average_reward_per_step.png
+Saved: plots/bandit_exp_.../average_cumulative_reward.png
+Saved: plots/bandit_exp_.../optimal_action_rate.png
+Saved: plots/bandit_exp_.../average_cumulative_expected_regret.png
+Experiment completed successfully.
+Experiment ID: bandit_exp_20261105_145548_656317
+Total runs: 300
+Total step records: 300,000
+```
 
 ### Regenerate plots for the latest experiment
 
@@ -261,11 +312,11 @@ Prints five summary tables used in `REPORT.md`.
 
 ---
 
-## 11. Database Design
+## 12. Database Design
 
 SQLite database: `bandit_results.db`.
 
-### 11.1. Schema
+### 12.1. Schema
 
 **`experiments`**
 - `experiment_id` (PK, TEXT)
@@ -290,11 +341,31 @@ SQLite database: `bandit_results.db`.
 
 Indexes: `idx_runs_env_agent` on `runs(environment, agent)`; `idx_steps_step` on `step_results(step)`.
 
-### 11.2. Duplicate-run behavior
+### 12.2. Design rationale
+
+- **Three tables, not one.** Flattening everything into a single
+  `step_results` table would require repeating `master_seed`, `env_seed`,
+  `agent_seed`, `epsilon`, and `alpha` on every one of the 300,000 rows.
+  Normalizing into `experiments` + `runs` + `step_results` keeps metadata
+  small (~300 rows) and step data compact (~300,000 rows).
+- **Foreign keys.** Deleting an experiment is intentionally blocked while
+  its runs exist. To clean up, `main.py` deletes rows in FK order
+  (`step_results` → `runs` → `experiments`).
+- **CHECK constraints on `reward` and `optimal_action`.** The most common
+  silent bug in a bandit simulator is storing a non-binary reward (e.g., a
+  probability by accident). The CHECK catches it at insert time.
+- **Indexes.** `runs(environment, agent)` speeds up the SQL comparison
+  query; `step_results(step)` speeds up per-step aggregates used for
+  plotting. The `(run_id, step)` primary key covers per-run time series.
+- **`executemany` in a single transaction per experiment.** Inserting
+  300,000 rows one at a time would take minutes; batching with a single
+  transaction takes a few seconds.
+
+### 12.3. Duplicate-run behavior
 
 Every execution of `main.py` produces a **new** `experiment_id` (microsecond-resolution timestamp). Duplicate IDs are rejected by the primary key. A failed mid-run leaves a partially written experiment that is **rolled back** by `main.py` before re-raising the exception, so the database never contains an experiment with missing run metadata or step records.
 
-### 11.3. SQL comparison query
+### 12.4. SQL comparison query
 
 Compares average reward and optimal-action rate per algorithm, separated by environment:
 
@@ -312,14 +383,57 @@ GROUP BY r.environment, r.agent
 ORDER BY r.environment, average_reward DESC;
 ```
 
+### 12.5. Reference database (bundled)
+
+The repository includes `bandit_results.db`, a reference SQLite database produced by running `python main.py` under the configuration in Section 5.
+
+| Property | Value |
+|---|---|
+| Experiment ID | `bandit_exp_20261105_145548_656317` |
+| Master seed | 42 |
+| Experiments | 1 |
+| Runs | 300 |
+| Step records | 300,000 |
+| File size | ~20 MB |
+
+Reviewers can inspect it directly without running the simulator:
+
+```bash
+sqlite3 bandit_results.db
+sqlite> SELECT * FROM experiments;
+```
+
+Or in Python:
+
+```python
+import sqlite3
+conn = sqlite3.connect("bandit_results.db")
+for row in conn.execute("SELECT * FROM experiments"):
+    print(row)
+```
+
+To regenerate it deterministically:
+
+```bash
+# Linux/macOS
+rm bandit_results.db
+python main.py
+
+# Windows PowerShell
+Remove-Item bandit_results.db -ErrorAction SilentlyContinue
+python main.py
+```
+
+Under master seed `42`, the regenerated database is bit-identical to the bundled one — only the `created_at` timestamp and the auto-incremented `run_id` values differ, since both derive from the wall clock. All reward, action, regret, and metric data are identical.
+
 ---
 
-## 12. Results
+## 13. Results
 
 Experiment: `bandit_exp_20261105_145548_656317`
 Master seed: `42`. All numbers below are reproducible.
 
-### 12.1. Average Reward and Optimal-Action Rate
+### 13.1. Average Reward and Optimal-Action Rate
 
 | Environment | Agent | Average Reward | Optimal-Action Rate |
 |---|---|---:|---:|
@@ -330,7 +444,7 @@ Master seed: `42`. All numbers below are reproducible.
 | Non-Stationary | Sample Average | 0.53964 | 0.44620 |
 | Non-Stationary | Constant Step | **0.74098** | **0.51886** |
 
-### 12.2. Final Cumulative Expected Regret (at step 1,000)
+### 13.2. Final Cumulative Expected Regret (at step 1,000)
 
 | Environment | Agent | Cumulative Expected Regret |
 |---|---|---:|
@@ -341,7 +455,7 @@ Master seed: `42`. All numbers below are reproducible.
 | Non-Stationary | Sample Average | 359.54 |
 | Non-Stationary | Constant Step | **156.05** |
 
-### 12.3. Adaptation around the change point (non-stationary)
+### 13.3. Adaptation around the change point (non-stationary)
 
 Cumulative expected regret at step 500 (before) and step 1,000 (after):
 
@@ -361,31 +475,46 @@ Optimal-action rate at selected steps after the change:
 
 Both ε-greedy agents are caught completely off-guard at step 510 (optimal-action rate = 0), but only the constant-step agent recovers meaningfully within the remaining 500 steps.
 
-### 12.4. Key findings
+### 13.4. Key findings
 
 - **Stationary:** Sample-average clearly wins on every metric (highest reward, lowest regret, highest optimal-action rate). Constant-step performs respectably but is handicapped by its permanent sensitivity to noise. Both converge to a 0.90 optimal-action rate by step 1,000.
 - **Non-stationary:** Constant-step decisively wins. Its regret grows ~3× slower than sample-average after the change, and its optimal-action rate at step 1,000 (0.72) is nearly three times that of sample-average (0.26).
 - **Random** is a stable baseline (optimal-action rate ≈ 0.20 ≈ 1/5; average reward ≈ 0.50 ≈ mean probability), confirming that both environments are correctly implemented.
 
+### 13.5. Plots
+
+All four plots for this experiment are included in the repository under
+[`plots/bandit_exp_20261105_145548_656317/`](plots/bandit_exp_20261105_145548_656317/):
+
+- [`average_reward_per_step.png`](plots/bandit_exp_20261105_145548_656317/average_reward_per_step.png)
+- [`average_cumulative_reward.png`](plots/bandit_exp_20261105_145548_656317/average_cumulative_reward.png)
+- [`optimal_action_rate.png`](plots/bandit_exp_20261105_145548_656317/optimal_action_rate.png)
+- [`average_cumulative_expected_regret.png`](plots/bandit_exp_20261105_145548_656317/average_cumulative_expected_regret.png)
+
+![Average Reward per Step](plots/bandit_exp_20261105_145548_656317/average_reward_per_step.png)
+![Average Cumulative Reward](plots/bandit_exp_20261105_145548_656317/average_cumulative_reward.png)
+![Optimal Action Rate](plots/bandit_exp_20261105_145548_656317/optimal_action_rate.png)
+![Average Cumulative Expected Regret](plots/bandit_exp_20261105_145548_656317/average_cumulative_expected_regret.png)
+
 ---
 
-## 13. Implementation Notes
+## 14. Implementation Notes
 
-### 13.1. Off-by-one fix in the environment step
+### 14.1. Off-by-one fix in the environment step
 
 An earlier version of the environment incremented `current_step` **before** reading the probability vector, so the regret reported at step *t* was computed against the probabilities of step *t + 1*. This only affected the transition step (t = 500) and has a negligible effect on averages across 50 runs — but it is conceptually incorrect. The current implementation reads probabilities **before** advancing the step counter, so `regret_t` and `optimal_action_t` are computed against the probabilities that produced the reward at step *t*. Reproducing the reported numbers with the current code confirms this is correct.
 
-### 13.2. Probability access
+### 14.2. Probability access
 
 `BanditEnvironment.get_probabilities()` is called exclusively by the experiment runner for evaluation. Agents never call it and never receive the probability vector or the pre-generated uniform matrix.
 
-### 13.3. Tie-breaking
+### 14.3. Tie-breaking
 
 When two or more arms share the maximum Q-value, both ε-greedy agents sample uniformly at random among the tied arms using their own RNG. This avoids the systematic low-index bias of `np.argmax`.
 
 ---
 
-## 14. Testing
+## 15. Testing
 
 Three standalone validation scripts:
 
@@ -401,7 +530,7 @@ All three pass on the reference experiment.
 
 ---
 
-## 15. Reproducibility
+## 16. Reproducibility
 
 To fully reproduce the reference experiment:
 
@@ -425,13 +554,13 @@ Under the fixed master seed (`42`), every trajectory, regret series, and plot is
 
 ---
 
-## 16. Detailed Analysis
+## 17. Detailed Analysis
 
 See [`REPORT.md`](REPORT.md) for the full discussion of results and the answers to all analysis questions.
 
 ---
 
-## 17. Limitations and Future Work
+## 18. Limitations and Future Work
 
 - Fixed ε and α (not tuned). Adaptive/decaying schedules would be natural extensions.
 - Single change point in the non-stationary environment.
@@ -441,6 +570,12 @@ See [`REPORT.md`](REPORT.md) for the full discussion of results and the answers 
 
 ---
 
-## 18. License
+## 19. Development Notes
+
+This project was developed iteratively as a learning exercise. The implementation, tests, and analysis were written and verified by the author. AI tools were used as a reference for standard bandit formulas and NumPy documentation; every line of code and every claim in `REPORT.md` was reviewed and can be defended in a follow-up discussion.
+
+---
+
+## 20. License
 
 Educational and experimental implementation.
