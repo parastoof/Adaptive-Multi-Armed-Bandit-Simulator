@@ -12,3 +12,15 @@ __pycache__/
 # IDE
 .vscode/
 .idea/
+
+# Ignore all SQLite databases...
+*.db
+*.db-journal
+*.db-wal
+
+# ...except the recorded reference experiment
+!bandit_results.db
+
+plots/*/
+!plots/.gitkeep
+!plots/bandit_exp_20261105_145548_656317/
